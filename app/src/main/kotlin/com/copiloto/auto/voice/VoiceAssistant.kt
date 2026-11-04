@@ -79,10 +79,12 @@ class VoiceAssistant(private val carContext: CarContext) {
         })
     }
 
-    private fun finishUtterance(id: String?) = main.post {
-        val cb = synchronized(speakCallbacks) { speakCallbacks.remove(id) } ?: return@post
-        abandon(speakFocus); speakFocus = null
-        cb()
+    private fun finishUtterance(id: String?) {
+        main.post {
+            val cb = synchronized(speakCallbacks) { speakCallbacks.remove(id) } ?: return@post
+            abandon(speakFocus); speakFocus = null
+            cb()
+        }
     }
 
     /** Dice [text] y llama a [onDone] al terminar (en el hilo principal). */
