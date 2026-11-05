@@ -43,6 +43,22 @@ sealed interface VoiceCommand {
     data object Yes : VoiceCommand
     data object No : VoiceCommand
     data object Stop : VoiceCommand
+
+    /** "abre GasofApp", "entra en el correo", "abre Flashscore". */
+    data class OpenApp(val name: String) : VoiceCommand
+
+    /** "lee mis correos", "¿tengo notificaciones?", "¿qué dice Flashscore?". [app] null = todas. */
+    data class ReadNotifications(val app: String? = null) : VoiceCommand
+
+    /** "¿qué partidos hay hoy?", "¿cómo va el Madrid?", "partidos de la Champions mañana". */
+    data class Matches(
+        val team: String? = null,
+        val competition: String? = null,
+        val dayOffset: Int = 0,
+        val myTeam: Boolean = false,
+    ) : VoiceCommand
+
+    data class SetTeam(val team: String) : VoiceCommand
     data class Unknown(val text: String) : VoiceCommand
 }
 
@@ -56,9 +72,9 @@ object CommandParser {
     private fun r(p: String) = Regex(p)
 
     private val STOP = r("^(nada|no nada|cancela|cancelar|para|parar|calla|callate|adios|hasta luego|gracias|muchas gracias|eso es todo|dejalo|salir|sal|cierra|olvidalo|nada mas)( gracias)?$")
-    private val HELP = r("\\b(ayuda|que puedes hacer|que sabes hacer|que te puedo pedir|opciones de voz|como funciona)\\b")
+    private val HELP = r("\\b(ayuda|que mas puedes hacer|que puedes hacer|que sabes hacer|que te puedo pedir|opciones de voz|como funciona)\\b")
     private val REPEAT = r("\\b(repite|repitelo|repetir|otra vez|que has dicho|no te he oido|no te he entendido|como dices)\\b")
-    private val MORE = r("\\b(mas opciones|otras opciones|siguientes|mas resultados|dame mas|hay mas|alguna mas|algo mas lejos)\\b")
+    private val MORE = r("^(sigue|continua|siguiente|sigue leyendo|lee mas|mas|dime mas|mas partidos|mas correos)$|\\b(mas opciones|otras opciones|siguientes|mas resultados|dame mas|hay mas|alguna mas|algo mas lejos)\\b")
     private val CONTINUE = r("\\b((continuar|continua|continuamos|seguir|sigue|seguimos|volver|vuelve|retomar|retoma|reanudar)( la| mi)? (a|al|hacia|con|ruta|viaje|camino|destino|navegacion)|vamos al destino|ir al destino|ruta original)\\b")
     private val YES = r("^(si|si si|vale|venga|ok|okey|de acuerdo|perfecto|adelante|claro|vamos|dale|eso|correcto|si por favor|si vamos|si llevame|llevame|me vale|esa|ese)( por favor| gracias)?$")
     private val NO = r("^(no|no gracias|ninguna|ninguno|ninguna de esas|otra|otro|mejor no|no me convence)$")
@@ -108,6 +124,15 @@ object CommandParser {
         if (NO.hit(s)) return VoiceCommand.No
         if (REPEAT.hit(s) && s.split(' ').size <= 5) return VoiceCommand.Repeat
         if (CONTINUE.hit(s)) return VoiceCommand.ContinueToDestination
+        if (MORE.hit(s) && !FUEL.hit(s) && !FOOD.hit(s)) return VoiceCommand.MoreOptions
+
+        SET_TEAM.find(s)?.let { m -> cleanTeam(m.groupValues[2])?.let { return VoiceCommand.SetTeam(it) } }
+        OPEN_APP.find(s)?.let { m ->
+            val name = m.groupValues[2].replace(Regex("^(la |el |mi |mis )"), "").trim()
+            if (name.isNotBlank()) return VoiceCommand.OpenApp(name)
+        }
+        notifications(s)?.let { return it }
+        matches(s)?.let { return it }
 
         fuelType(s)?.let { ft -> if (SET_FUEL.hit(s) && !FUEL_SEARCH_VERB.hit(s)) return VoiceCommand.SetFuel(ft) }
 
@@ -131,8 +156,6 @@ object CommandParser {
                 goNow = GO_NOW.hit(s) && !s.contains("donde"),
             )
         }
-        if (MORE.hit(s)) return VoiceCommand.MoreOptions
-
         if (ROUTE_WORDS.hit(s) || NO_TOLLS.hit(s)) {
             return VoiceCommand.PlanRoute(
                 destination = destination(s),
@@ -172,6 +195,51 @@ object CommandParser {
         if (isDetails) return VoiceCommand.Details(index)
         return index?.let { VoiceCommand.Select(index = it) }
     }
+
+    // ------------------------------------------------------------ Apps, correo y deportes
+
+    private val OPEN_APP = r("^(?:oye |copiloto )?(abre|abrir|abreme|entra en|entra a|entrar en|lanza|inicia|ejecuta|arranca|quiero abrir|puedes abrir)(?: la app| la aplicacion| app| aplicacion)?(?: de)? (.+)$")
+    private val MAIL = r("\\b(correo\\w*|emails?|e mails?|mails?|gmail|outlook|bandeja de entrada)\\b")
+    private val NOTIF = r("\\b(notificacion\\w*|avisos|alertas|mensajes nuevos)\\b")
+    private val READ_VERB = r("\\b(lee|leeme|leer|leelos|tengo|hay|ha llegado|han llegado|mira|revisa|comprueba|dime|algun|alguna|nuevo|nuevos|ultimo|ultimos)\\b")
+    private val WHAT_SAYS = r("^(?:que|y que) (?:dice|dicen|pone|hay en|tengo en) (?:el |la |mi )?(.+)$")
+    private val NOTIF_OF = r("\\b(?:notificacion\\w*|avisos|alertas) (?:de|del) (?:la |el |mi )?(.+)$")
+
+    private fun notifications(s: String): VoiceCommand? {
+        NOTIF_OF.find(s)?.let { return VoiceCommand.ReadNotifications(it.groupValues[1].trim()) }
+        if (NOTIF.hit(s)) return VoiceCommand.ReadNotifications(null)
+        if (MAIL.hit(s) && (READ_VERB.hit(s) || s.split(' ').size <= 3)) return VoiceCommand.ReadNotifications("correo")
+        WHAT_SAYS.find(s)?.let { m ->
+            val app = m.groupValues[1].trim()
+            if (!MATCH_WORDS.hit(s) && app.isNotBlank()) return VoiceCommand.ReadNotifications(app)
+        }
+        return null
+    }
+
+    private val MATCH_WORDS = r("\\b(partido\\w*|juega|juegan|jugamos|resultado\\w*|marcador\\w*|como va|como van|como ha quedado|como han quedado|como quedo|quien gana|quien va ganando|futbol|champions|nba|jornada)\\b")
+    private val TEAM_AFTER = r("\\b(?:juega|juegan|como va|como van|como ha quedado|como quedo|como ha ido|partido del|partido de|partidos del|partidos de|resultado del|resultado de|marcador del|marcador de|quien gana el|gana el) (?:el |la |los )?(.+)$")
+    private val SET_TEAM = r("\\b(mi equipo (?:favorito )?es|soy (?:del|de la|de los|de)) (.+)$")
+    private val DAY_WORDS = r("\\b(hoy|manana|ayer|esta noche|esta tarde|ahora|en directo|en vivo|ahora mismo|este finde|el finde)\\b.*$")
+
+    private fun matches(s: String): VoiceCommand? {
+        if (!MATCH_WORDS.hit(s)) return null
+        val day = when {
+            Regex("\\bayer\\b").hit(s) -> -1
+            Regex("\\bmanana\\b").hit(s) && !s.contains("por la manana") -> 1
+            else -> 0
+        }
+        val competition = com.copiloto.core.sports.Espn.LEAGUES.firstOrNull { l -> l.keywords.any { Regex("\\b$it\\b").hit(s) } }?.spoken
+        val myTeam = Regex("\\b(mi equipo|los mios|nuestro equipo)\\b").hit(s)
+        val team = if (myTeam) null else TEAM_AFTER.find(s)?.groupValues?.get(1)?.let(::cleanTeam)
+            ?.takeIf { t -> com.copiloto.core.sports.Espn.LEAGUES.none { l -> l.keywords.any { k -> t == k || t == "la $k" } } }
+        return VoiceCommand.Matches(team = team, competition = competition, dayOffset = day, myTeam = myTeam)
+    }
+
+    private fun cleanTeam(raw: String): String? = DAY_WORDS.replace(raw, "")
+        .replace(Regex("\\b(en la|en el|de la|de|en) (liga|champions|copa.*|europa league|premier)\\b.*$"), "")
+        .replace(Regex("^(el |la |los )"), "")
+        .trim()
+        .takeIf { it.isNotBlank() && it !in setOf("hoy", "partido", "partidos", "futbol", "que", "quien") }
 
     fun fuelType(s: String): FuelType? = when {
         Regex("\\b(diesel|gasoleo|gasoil) (premium|plus|optima|e\\+|10)\\b").hit(s) -> FuelType.DIESEL_PREMIUM

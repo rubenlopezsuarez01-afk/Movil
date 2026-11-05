@@ -70,6 +70,15 @@ class CopilotoSession : Session() {
         return HomeScreen(carContext, this)
     }
 
+    /**
+     * Si Copiloto ya está en pantalla y se vuelve a pedir "Ok Google, abre Copiloto"
+     * (por ejemplo con el botón de voz del volante), vuelve a escuchar.
+     */
+    override fun onNewIntent(intent: Intent) {
+        if (!hasPermissions()) return
+        if (state == VoiceState.IDLE) startConversation() else pushToTalk()
+    }
+
     fun hasPermissions(): Boolean = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(carContext, it) == PackageManager.PERMISSION_GRANTED
     }
@@ -152,7 +161,7 @@ class CopilotoSession : Session() {
         val sm = carContext.getCarService(androidx.car.app.ScreenManager::class.java)
         when (display) {
             Display.Home -> sm.popToRoot()
-            is Display.Places, is Display.Routes -> {
+            is Display.Places, is Display.Routes, is Display.Info -> {
                 val top = sm.top
                 if (top is ResultsScreen) {
                     // Se actualiza la pantalla existente para no consumir pasos de la plantilla.

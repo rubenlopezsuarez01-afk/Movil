@@ -4,7 +4,13 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.location.Address
 import android.location.Geocoder
+import com.copiloto.auto.notifications.NotificationReader
 import com.copiloto.core.LatLng
+import com.copiloto.core.apps.AppNotification
+import com.copiloto.core.sports.Espn
+import com.copiloto.core.sports.League
+import com.copiloto.core.sports.Match
+import java.time.LocalDate
 import com.copiloto.core.dialog.Place
 import com.copiloto.core.dialog.Services
 import com.copiloto.core.dialog.VoiceCommand
@@ -37,6 +43,8 @@ import java.util.Locale
  *  - Restaurantes: OpenStreetMap (Overpass).
  *  - Geocodificación: Geocoder de Android, con Nominatim (OSM) como respaldo.
  *  - Rutas alternativas: OSRM.
+ *  - Notificaciones (correo, Flashscore…): NotificationReader.
+ *  - Partidos: marcador público de ESPN.
  * Ninguna requiere clave de API.
  */
 class AndroidServices(context: Context) : Services {
@@ -145,6 +153,19 @@ class AndroidServices(context: Context) : Services {
             // Si el servidor no admite la exclusión, al menos devolvemos las rutas normales.
             if (exclude != null) Osrm.parse(Http.get(Osrm.url(from, to, null), timeoutMs = 20_000)) else throw e
         }
+    }
+
+    override fun notificationAccess(): Boolean = NotificationReader.isEnabled(app)
+
+    override suspend fun notifications(): List<AppNotification> = NotificationReader.recent()
+
+    override suspend fun matches(from: LocalDate, to: LocalDate, leagues: List<League>): List<Match> = coroutineScope {
+        val results = leagues.map { league ->
+            async { runCatching { Espn.parse(Http.get(Espn.url(league, from, to), timeoutMs = 10_000), league) } }
+        }.awaitAll()
+        // Si fallan todas las consultas (sin cobertura), se avisa; si falla alguna, se ignora.
+        if (results.all { it.isFailure }) throw results.first().exceptionOrNull() ?: IllegalStateException()
+        results.flatMap { it.getOrDefault(emptyList()) }
     }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")

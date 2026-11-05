@@ -110,6 +110,8 @@ class HomeScreen(carContext: CarContext, session: CopilotoSession) : VoiceAwareS
 }
 
 /** Resultados (gasolineras, restaurantes o rutas). Se elige por voz ("la segunda") o tocando. */
+private const val MAX_ROWS = 6
+
 class ResultsScreen(
     carContext: CarContext,
     session: CopilotoSession,
@@ -124,6 +126,7 @@ class ResultsScreen(
     override fun onGetTemplate(): Template = when (val d = display) {
         is Display.Places -> places(d)
         is Display.Routes -> routes(d)
+        is Display.Info -> info(d)
         Display.Home -> MessageTemplate.Builder("Sin resultados").setHeaderAction(Action.BACK).build()
     }
 
@@ -152,6 +155,26 @@ class ResultsScreen(
             .setHeaderAction(Action.BACK)
             .setItemList(list.build())
             .setCurrentLocationEnabled(locationGranted)
+            .setActionStrip(micStrip())
+            .build()
+    }
+
+    /** Correos, notificaciones o partidos: solo lectura, el contenido se escucha por voz. */
+    private fun info(d: Display.Info): Template {
+        val list = ItemList.Builder()
+        d.items.take(MAX_ROWS).forEach {
+            list.addItem(
+                Row.Builder()
+                    .setTitle(if (it.badge.isNotBlank()) "${it.title}  ·  ${it.badge}" else it.title)
+                    .apply { if (it.subtitle.isNotBlank()) addText(it.subtitle) }
+                    .build(),
+            )
+        }
+        if (d.items.isEmpty()) list.setNoItemsMessage("Nada que mostrar")
+        return ListTemplate.Builder()
+            .setTitle(if (session.state == VoiceState.IDLE) d.title else stateLabel(session.state, d.title))
+            .setHeaderAction(Action.BACK)
+            .setSingleList(list.build())
             .setActionStrip(micStrip())
             .build()
     }

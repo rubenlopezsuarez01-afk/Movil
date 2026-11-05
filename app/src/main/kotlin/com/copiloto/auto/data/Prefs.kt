@@ -14,6 +14,7 @@ class Prefs(context: Context) {
         tankLitres = sp.getInt(KEY_TANK, 50),
         home = sp.getString(KEY_HOME, null)?.takeIf { it.isNotBlank() },
         work = sp.getString(KEY_WORK, null)?.takeIf { it.isNotBlank() },
+        team = sp.getString(KEY_TEAM, null)?.takeIf { it.isNotBlank() },
     )
 
     fun save(s: Settings) {
@@ -23,6 +24,7 @@ class Prefs(context: Context) {
             .putInt(KEY_TANK, s.tankLitres)
             .putString(KEY_HOME, s.home)
             .putString(KEY_WORK, s.work)
+            .putString(KEY_TEAM, s.team)
             .apply()
     }
 
@@ -32,5 +34,6 @@ class Prefs(context: Context) {
         const val KEY_TANK = "tank_litres"
         const val KEY_HOME = "home"
         const val KEY_WORK = "work"
+        const val KEY_TEAM = "team"
     }
 }

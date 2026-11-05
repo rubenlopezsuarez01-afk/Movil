@@ -1,6 +1,19 @@
 package com.copiloto.core.dialog
 
 import com.copiloto.core.LatLng
+import com.copiloto.core.apps.AppIntent
+import com.copiloto.core.apps.AppNotification
+import com.copiloto.core.apps.Apps
+import com.copiloto.core.sports.Espn
+import com.copiloto.core.sports.League
+import com.copiloto.core.sports.Match
+import com.copiloto.core.sports.MatchSpeech
+import com.copiloto.core.sports.MatchState
+import com.copiloto.core.sports.Teams
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.TextStyle
+import java.util.Locale
 import com.copiloto.core.Speech
 import com.copiloto.core.distanceMeters
 import com.copiloto.core.distanceToPolylineMeters
@@ -29,6 +42,18 @@ interface Services {
     suspend fun restaurants(command: VoiceCommand.FindFood, center: LatLng, radiusM: Int): List<Restaurant>
     suspend fun geocode(query: String, near: LatLng?): Place?
     suspend fun routes(from: LatLng, to: LatLng, avoidTolls: Boolean, avoidMotorways: Boolean): List<RouteOption>
+
+    /** ¿El usuario ha dado permiso para leer notificaciones? */
+    fun notificationAccess(): Boolean = false
+
+    /** Notificaciones recientes del móvil, de la más nueva a la más antigua. */
+    suspend fun notifications(): List<AppNotification> = emptyList()
+
+    /** Partidos entre [from] y [to] (ambos incluidos) de las competiciones indicadas. */
+    suspend fun matches(from: LocalDate, to: LocalDate, leagues: List<League>): List<Match> = emptyList()
+
+    fun zone(): ZoneId = ZoneId.of("Europe/Madrid")
+    fun today(): LocalDate = LocalDate.now(zone())
 }
 
 data class Settings(
@@ -37,6 +62,8 @@ data class Settings(
     val tankLitres: Int = 50,
     val home: String? = null,
     val work: String? = null,
+    /** Equipo favorito ("¿juega mi equipo hoy?"). */
+    val team: String? = null,
 )
 
 /** Lo que se muestra en la pantalla del coche. */
@@ -44,6 +71,8 @@ sealed interface Display {
     data object Home : Display
     data class Places(val title: String, val items: List<Item>) : Display
     data class Routes(val title: String, val items: List<Item>) : Display
+    /** Lista solo informativa (notificaciones, partidos). */
+    data class Info(val title: String, val items: List<Item>) : Display
 
     data class Item(val title: String, val subtitle: String, val location: LatLng?, val badge: String)
 }
@@ -101,6 +130,10 @@ class Conversation(
     private var pending: Pending? = null
     private var lastSpeech = ""
     private var misunderstood = 0
+    /** Lectura en curso (correos, notificaciones, partidos) para "sigue" / "más". */
+    private var readout: List<String> = emptyList()
+    private var readoutPos = 0
+    private var readoutActive = false
 
     val hasDestination get() = destination != null
 
@@ -144,6 +177,14 @@ class Conversation(
 
         // Cualquier otra orden cancela la pregunta pendiente.
         pending = null
+        if (readoutActive) {
+            when (cmd) {
+                VoiceCommand.MoreOptions, VoiceCommand.Yes -> return continueReadout()
+                VoiceCommand.No -> { readoutActive = false; return say("Vale. ¿Algo más?") }
+                VoiceCommand.Repeat -> {}
+                else -> readoutActive = false
+            }
+        }
         if (cmd !is VoiceCommand.Unknown) misunderstood = 0
         return when (cmd) {
             is VoiceCommand.FindFuel -> findFuel(cmd)
@@ -156,13 +197,22 @@ class Conversation(
                 onSettingsChanged(settings)
                 say("Anotado: a partir de ahora buscaré precios de ${cmd.fuel.spoken}.")
             }
+            is VoiceCommand.SetTeam -> {
+                settings = settings.copy(team = cmd.team)
+                onSettingsChanged(settings)
+                say("Anotado, tu equipo es el ${cmd.team.replaceFirstChar { it.uppercase() }}. Pregúntame '¿juega mi equipo hoy?'.")
+            }
+            is VoiceCommand.OpenApp -> openApp(cmd.name)
+            is VoiceCommand.ReadNotifications -> readNotifications(cmd.app)
+            is VoiceCommand.Matches -> matches(cmd)
             VoiceCommand.ContinueToDestination -> continueToDestination()
             VoiceCommand.MoreOptions -> moreOptions()
             VoiceCommand.Repeat -> Turn(lastSpeech.ifBlank { "Todavía no te he dicho nada." })
             VoiceCommand.Help -> say(
                 "Puedes decirme, por ejemplo: gasolinera más barata, diésel más barato de camino, " +
                     "dónde comer, una pizzería cerca, rutas a Valencia sin peajes, llévame a la segunda, " +
-                    "dame detalles de la primera o continuar a mi destino. Para terminar, di gracias.",
+                    "dame detalles de la primera, continuar a mi destino, lee mis correos, " +
+                    "qué partidos hay hoy, cómo va el Madrid o abre Flashscore. Para terminar, di gracias.",
             )
             VoiceCommand.Yes -> if (choices.isNotEmpty()) select(VoiceCommand.Select(index = 0)) else say("¿En qué te ayudo?")
             VoiceCommand.No -> if (choices.size > (page + 1) * PAGE) moreOptions() else say("Vale. ¿Necesitas algo más?")
@@ -177,6 +227,158 @@ class Conversation(
                 }
             }
         }
+    }
+
+    // ---------------------------------------------------------------- Apps del móvil
+
+    /**
+     * Android Auto no deja mostrar apps normales del móvil en la pantalla del coche,
+     * así que "abre X" se resuelve haciendo por voz lo que harías en esa app.
+     */
+    private suspend fun openApp(name: String): Turn = when (Apps.classify(name)) {
+        AppIntent.FUEL -> {
+            val t = findFuel(VoiceCommand.FindFuel())
+            t.copy(speech = "No puedo abrir esa app en la pantalla del coche, pero uso los mismos precios oficiales. ${t.speech}")
+        }
+        AppIntent.MAIL -> readNotifications("correo")
+        AppIntent.SPORTS -> {
+            val t = matches(VoiceCommand.Matches())
+            t.copy(speech = "Te cuento los partidos de hoy. ${t.speech}")
+        }
+        AppIntent.OTHER -> {
+            val fromApp = if (services.notificationAccess()) Apps.filter(safeNotifications(), name) else emptyList()
+            if (fromApp.isNotEmpty()) readNotifications(name)
+            else say(
+                "Android Auto no deja abrir $name en la pantalla del coche mientras conduces. " +
+                    "Si es una app compatible con Android Auto, como Spotify, WhatsApp o Waze, pídeselo a Google: " +
+                    "'Ok Google, abre $name'. Si quieres, te leo sus notificaciones cuando lleguen.",
+            )
+        }
+    }
+
+    private suspend fun safeNotifications(): List<AppNotification> = runCatching { services.notifications() }.getOrDefault(emptyList())
+
+    private suspend fun readNotifications(app: String?): Turn {
+        if (!services.notificationAccess()) {
+            return say(
+                "Para leerte el correo y las notificaciones necesito permiso. Cuando estés parado, abre Copiloto en el móvil " +
+                    "y pulsa 'Permitir leer notificaciones'.",
+            )
+        }
+        val isMail = app != null && Apps.classify(app) == AppIntent.MAIL
+        val list = Apps.filter(safeNotifications(), app).take(MAX_READOUT)
+        if (list.isEmpty()) {
+            return say(
+                when {
+                    isMail -> "No tienes correos nuevos."
+                    app != null -> "No tengo notificaciones recientes de $app."
+                    else -> "No tienes notificaciones nuevas."
+                },
+            )
+        }
+        val includeApp = !isMail && list.map { it.appName }.distinct().size > 1
+        val header = when {
+            isMail -> if (list.size == 1) "Tienes un correo." else "Tienes ${list.size} correos recientes."
+            app != null -> "De ${list.first().appName} tienes ${list.size} ${if (list.size == 1) "aviso" else "avisos"}."
+            else -> "Tienes ${list.size} notificaciones."
+        }
+        val title = if (isMail) "Correo" else app?.replaceFirstChar { it.uppercase() } ?: "Notificaciones"
+        val display = Display.Info(title, list.map {
+            Display.Item(it.title.ifBlank { it.appName }, it.text.take(80), null, it.appName)
+        })
+        return startReadout(header, list.map { Apps.spoken(it, includeApp) }, display)
+    }
+
+    // ---------------------------------------------------------------- Partidos
+
+    private suspend fun matches(cmd: VoiceCommand.Matches): Turn {
+        val team = cmd.team ?: if (cmd.myTeam) settings.team ?: return say(
+            "No sé cuál es tu equipo. Dímelo así: 'mi equipo es el Betis'.",
+        ) else null
+        val league = cmd.competition?.let { c -> Espn.LEAGUES.firstOrNull { it.spoken == c } }
+        val leagues = when {
+            league != null -> listOf(league)
+            team != null -> Espn.LEAGUES.filter { it.path.startsWith("soccer/") }
+            else -> Espn.LEAGUES.take(TOP_LEAGUES)
+        }
+        val day = services.today().plusDays(cmd.dayOffset.toLong())
+        val zone = services.zone()
+        val dayWord = when (cmd.dayOffset) { -1 -> "ayer"; 1 -> "mañana"; else -> "hoy" }
+        val found = try {
+            services.matches(day, day, leagues)
+        } catch (e: Exception) {
+            return networkError("los partidos")
+        }
+
+        if (team != null) {
+            val teamName = team.replaceFirstChar { it.uppercase() }
+            val mine = found.filter { Teams.matches(it, team) }.sortedBy { it.start }
+            if (mine.isNotEmpty()) {
+                val lines = mine.map { "${MatchSpeech.line(it, zone)}, ${it.competition}" }
+                return say(
+                    (if (mine.first().state == MatchState.SCHEDULED) "$dayWord juega el $teamName: " else "") +
+                        lines.joinToString(". ") + ".",
+                    Display.Info(teamName, mine.map { item(it, zone) }),
+                )
+            }
+            // No juega ese día: se busca el próximo partido en la próxima semana.
+            if (cmd.dayOffset >= 0) {
+                val next = runCatching { services.matches(day.plusDays(1), day.plusDays(8), leagues) }.getOrDefault(emptyList())
+                    .filter { Teams.matches(it, team) && it.state == MatchState.SCHEDULED }
+                    .minByOrNull { it.start }
+                if (next != null) {
+                    val local = next.start.atZone(zone)
+                    val weekday = local.dayOfWeek.getDisplayName(TextStyle.FULL, Locale("es", "ES"))
+                    return say(
+                        "$dayWord no juega el $teamName. Su próximo partido es el $weekday ${local.dayOfMonth}: " +
+                            "${MatchSpeech.line(next, zone)}, en ${next.competition}.",
+                        Display.Info(teamName, listOf(item(next, zone))),
+                    )
+                }
+            }
+            return say("No encuentro partidos del $teamName $dayWord.")
+        }
+
+        if (found.isEmpty()) {
+            return say("No hay partidos ${league?.let { "de ${it.spoken} " } ?: "de las competiciones principales "}$dayWord.")
+        }
+        val sorted = found.sortedWith(compareBy<Match>({ it.state != MatchState.LIVE }, { it.priority }, { it.start }))
+        val live = sorted.count { it.state == MatchState.LIVE }
+        var lastComp = ""
+        val lines = sorted.map { m ->
+            val prefix = if (m.competition != lastComp) "En ${m.competition}: " else ""
+            lastComp = m.competition
+            prefix + MatchSpeech.line(m, zone)
+        }
+        val header = buildString {
+            append("${if (cmd.dayOffset == -1) "Ayer hubo" else "${dayWord.replaceFirstChar { it.uppercase() }} hay"} ${sorted.size} ${if (sorted.size == 1) "partido" else "partidos"}")
+            if (live > 0) append(", $live en juego ahora")
+            append(".")
+        }
+        return startReadout(header, lines, Display.Info("Partidos $dayWord", sorted.take(MAX_READOUT).map { item(it, zone) }))
+    }
+
+    private fun item(m: Match, zone: ZoneId) =
+        Display.Item("${m.home} - ${m.away}", m.competition, null, MatchSpeech.shortLine(m, zone))
+
+    // ---------------------------------------------------------------- Lectura por partes
+
+    private fun startReadout(header: String, lines: List<String>, display: Display): Turn {
+        readout = lines
+        readoutPos = 0
+        readoutActive = true
+        return nextReadoutChunk(header, display)
+    }
+
+    private fun continueReadout(): Turn =
+        if (readoutPos >= readout.size) { readoutActive = false; say("Eso es todo. ¿Algo más?") }
+        else nextReadoutChunk("", null)
+
+    private fun nextReadoutChunk(header: String, display: Display?): Turn {
+        val chunk = readout.drop(readoutPos).take(READOUT_CHUNK)
+        readoutPos += chunk.size
+        val tail = if (readoutPos < readout.size) " ¿Sigo?" else { readoutActive = false; " ¿Algo más?" }
+        return say("$header ${chunk.joinToString(". ") { it.trimEnd('.') }}.$tail".trim(), display)
     }
 
     // ---------------------------------------------------------------- Gasolina
@@ -498,5 +700,8 @@ class Conversation(
     private companion object {
         const val PAGE = 3
         const val MAX_RESULTS = 6
+        const val MAX_READOUT = 12
+        const val READOUT_CHUNK = 4
+        const val TOP_LEAGUES = 7
     }
 }

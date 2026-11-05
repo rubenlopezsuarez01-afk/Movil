@@ -2,7 +2,9 @@ package com.copiloto.auto
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -48,7 +50,9 @@ class MainActivity : Activity() {
                 "• \"Gasolinera más barata\" / \"diésel más barato de camino\"\n" +
                 "• \"Dónde comer\" / \"una pizzería cerca\"\n" +
                 "• \"Rutas a Valencia sin peajes\" → \"la segunda\"\n" +
-                "• \"Llévame a la primera\" · \"Continuar a mi destino\"", 14f,
+                "• \"Llévame a la primera\" · \"Continuar a mi destino\"\n" +
+                "• \"Lee mis correos\" · \"¿Qué dice Flashscore?\"\n" +
+                "• \"¿Qué partidos hay hoy?\" · \"¿Cómo va el Madrid?\"", 14f,
         ))
 
         root.addView(Button(this).apply {
@@ -56,6 +60,11 @@ class MainActivity : Activity() {
             setOnClickListener {
                 requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.RECORD_AUDIO), 1)
             }
+        })
+
+        root.addView(Button(this).apply {
+            text = "Permitir leer notificaciones (correo, Flashscore…)"
+            setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
         })
 
         root.addView(label("Combustible de tu coche"))
@@ -83,6 +92,8 @@ class MainActivity : Activity() {
         val home = text("Calle, número, ciudad", s.home).also(root::addView)
         root.addView(label("Dirección del trabajo (\"llévame al trabajo\")"))
         val work = text("Calle, número, ciudad", s.work).also(root::addView)
+        root.addView(label("Tu equipo (\"¿juega mi equipo hoy?\")"))
+        val team = text("Betis, Real Madrid, Barcelona…", s.team).also(root::addView)
 
         root.addView(Button(this).apply {
             text = "Guardar"
@@ -96,6 +107,7 @@ class MainActivity : Activity() {
                         tankLitres = tank.text.toString().toIntOrNull()?.coerceIn(10, 150) ?: s.tankLitres,
                         home = home.text.toString().trim().ifBlank { null },
                         work = work.text.toString().trim().ifBlank { null },
+                        team = team.text.toString().trim().lowercase().ifBlank { null },
                     ),
                 )
                 Toast.makeText(this@MainActivity, "Guardado", Toast.LENGTH_SHORT).show()

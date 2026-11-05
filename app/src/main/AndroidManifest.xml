@@ -40,6 +40,17 @@
             </intent-filter>
         </service>
 
+        <!-- Lee las notificaciones (correo, Flashscore…) para contarlas por voz. -->
+        <service
+            android:name=".notifications.NotificationReader"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Pantalla del móvil: permisos y preferencias. -->
         <activity
             android:name=".MainActivity"
